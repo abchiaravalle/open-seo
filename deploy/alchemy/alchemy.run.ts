@@ -245,9 +245,11 @@ const resolveSelfHostAccess = (
         policyName: `open-seo ${stage} self-host users`,
         applicationName: `open-seo ${stage}`,
         domain: workersDevHost,
-        // Gate the custom hostname(s) AND the workers.dev URL with one
-        // application (one AUD), so neither can be reached ungated.
-        hostnames: [...customDomains, workersDevHost],
+        // Gate the custom hostname(s), the workers.dev URL, AND its
+        // version-preview URLs (alchemy always enables previews alongside
+        // workers.dev) with one application (one AUD), so none can be
+        // reached ungated.
+        hostnames: [...customDomains, workersDevHost, `*-${workersDevHost}`],
         allowedIdps,
         sessionDuration: sessionDuration || undefined,
         emails: allowedEmails,
