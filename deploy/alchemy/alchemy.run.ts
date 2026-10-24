@@ -1,5 +1,6 @@
 import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
+import * as Output from "alchemy/Output";
 import * as CfWorkers from "@distilled.cloud/cloudflare/workers";
 import * as ZeroTrust from "@distilled.cloud/cloudflare/zero-trust";
 import * as Config from "effect/Config";
@@ -168,8 +169,9 @@ const resolveSelfHostAccess = (
   Effect.gen(function* () {
     let teamDomain = yield* optionalVar("TEAM_DOMAIN");
     let policyAud: Alchemy.Input<string> = yield* optionalVar("POLICY_AUD");
+    let serviceIdentities: Alchemy.Input<string> = "";
     if (!provision || (teamDomain && policyAud)) {
-      return { teamDomain, policyAud };
+      return { teamDomain, policyAud, serviceIdentities };
     }
     const { accountId } = yield* yield* Cloudflare.CloudflareEnvironment;
 
@@ -239,6 +241,38 @@ const resolveSelfHostAccess = (
         .filter(Boolean);
       const sessionDuration = yield* optionalVar("ACCESS_SESSION_DURATION");
       const workersDevHost = `${workerName(stage)}.${subdomain}`;
+      // Optional machine client (e.g. an AI agent's MCP connection): an Access
+      // service token, a non-identity policy admitting ONLY that token, and an
+      // explicit token→identity mapping the app checks (cloudflareAccess.ts).
+      const serviceTokenName = yield* optionalVar("ACCESS_SERVICE_TOKEN_NAME");
+      const serviceTokenEmail = yield* optionalVar("ACCESS_SERVICE_TOKEN_EMAIL");
+      const extraPolicyIds: Alchemy.Input<string>[] = [];
+      if (serviceTokenName) {
+        if (!serviceTokenEmail.includes("@")) {
+          return yield* Effect.die(
+            new Error(
+              "Set ACCESS_SERVICE_TOKEN_EMAIL to the identity the service token acts as.",
+            ),
+          );
+        }
+        const token = yield* Cloudflare.Access.ServiceToken(
+          "SelfHostServiceToken",
+          { name: serviceTokenName, duration: "8760h" },
+        );
+        const tokenPolicy = yield* Cloudflare.Access.Policy(
+          "SelfHostServiceTokenPolicy",
+          {
+            name: `open-seo ${stage} service token (${serviceTokenName})`,
+            decision: "non_identity",
+            include: [{ serviceToken: { tokenId: token.serviceTokenId } }],
+          },
+        );
+        extraPolicyIds.push(tokenPolicy.policyId);
+        serviceIdentities = Output.map(
+          token.clientId,
+          (clientId: string) => `${clientId}=${serviceTokenEmail}`,
+        );
+      }
       const application = yield* emailAccessGate({
         policyId: "SelfHostAllowUsers",
         applicationId: "SelfHostAccess",
@@ -253,11 +287,12 @@ const resolveSelfHostAccess = (
         allowedIdps,
         sessionDuration: sessionDuration || undefined,
         emails: allowedEmails,
+        extraPolicyIds,
       });
       policyAud = application.aud;
     }
 
-    return { teamDomain, policyAud };
+    return { teamDomain, policyAud, serviceIdentities };
   });
 
 // Secrets/vars resolve from Config (`Config.redacted` → Cloudflare
@@ -508,6 +543,7 @@ export default Alchemy.Stack(
         AUDIT_BROWSER_RENDERING: "true",
         TEAM_DOMAIN: access.teamDomain,
         POLICY_AUD: access.policyAud,
+        ACCESS_SERVICE_IDENTITIES: access.serviceIdentities,
 
         // Service binding to the audit worker's AuditEngine entrypoint
         // (cancel + GDPR erasure of scratchpad state; env key = binding

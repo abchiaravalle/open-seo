@@ -91,8 +91,34 @@ export async function resolveCloudflareAccessContext(
   const userEmail = typeof payload.email === "string" ? payload.email : null;
 
   if (!userId || !userEmail) {
+    // Service-token requests (non-identity Access policy) carry no user: their
+    // JWT has an empty `sub`, no `email`, and the token's Client ID in
+    // `common_name`. Admit only Client IDs explicitly mapped to an identity in
+    // ACCESS_SERVICE_IDENTITIES ("<clientId>=<email>,..."), so a token added to
+    // the Access app later never gets workspace access implicitly.
+    const commonName =
+      typeof payload.common_name === "string" ? payload.common_name : null;
+    const serviceEmail = commonName
+      ? resolveServiceIdentityEmail(commonName)
+      : null;
+    if (commonName && serviceEmail) {
+      return resolveSharedWorkspaceContext(`service:${commonName}`, serviceEmail);
+    }
     throw new AppError("UNAUTHENTICATED");
   }
 
   return resolveSharedWorkspaceContext(userId, userEmail);
+}
+
+function resolveServiceIdentityEmail(clientId: string): string | null {
+  const raw = env.ACCESS_SERVICE_IDENTITIES?.trim();
+  if (!raw) return null;
+  for (const entry of raw.split(",")) {
+    const separator = entry.indexOf("=");
+    if (separator <= 0) continue;
+    const id = entry.slice(0, separator).trim();
+    const email = entry.slice(separator + 1).trim();
+    if (id === clientId && email.includes("@")) return email;
+  }
+  return null;
 }

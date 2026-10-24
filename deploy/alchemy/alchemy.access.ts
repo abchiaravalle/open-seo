@@ -8,6 +8,7 @@
 // `open-seo-<stage>` naming stays comment-synced (and is backstopped by the
 // workflow's Access verify step).
 
+import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
@@ -69,6 +70,8 @@ export const emailAccessGate = (options: {
   hostnames?: string[];
   allowedIdps?: string[];
   sessionDuration?: string;
+  /** Extra policy ids (e.g. a service-token policy) attached after the email policy. */
+  extraPolicyIds?: Alchemy.Input<string>[];
 }) =>
   Effect.gen(function* () {
     const allow = yield* Cloudflare.Access.Policy(options.policyId, {
@@ -100,6 +103,6 @@ export const emailAccessGate = (options: {
       ...(options.sessionDuration
         ? { sessionDuration: options.sessionDuration }
         : {}),
-      policies: [allow.policyId],
+      policies: [allow.policyId, ...(options.extraPolicyIds ?? [])],
     });
   });
