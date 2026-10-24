@@ -163,6 +163,7 @@ const resolveSelfHostAccess = (
   stage: string,
   provision: boolean,
   workersSubdomain: string,
+  customDomains: string[],
 ) =>
   Effect.gen(function* () {
     let teamDomain = yield* optionalVar("TEAM_DOMAIN");
@@ -232,12 +233,23 @@ const resolveSelfHostAccess = (
       const allowedEmails = yield* requireAllowedEmails(
         "Set ACCESS_ALLOWED_EMAILS to the comma-separated emails allowed through Cloudflare Access — or set TEAM_DOMAIN and POLICY_AUD to manage the Access application yourself.",
       );
+      const allowedIdps = (yield* optionalVar("ACCESS_ALLOWED_IDPS"))
+        .split(",")
+        .map((idp) => idp.trim())
+        .filter(Boolean);
+      const sessionDuration = yield* optionalVar("ACCESS_SESSION_DURATION");
+      const workersDevHost = `${workerName(stage)}.${subdomain}`;
       const application = yield* emailAccessGate({
         policyId: "SelfHostAllowUsers",
         applicationId: "SelfHostAccess",
         policyName: `open-seo ${stage} self-host users`,
         applicationName: `open-seo ${stage}`,
-        domain: `${workerName(stage)}.${subdomain}`,
+        domain: workersDevHost,
+        // Gate the custom hostname(s) AND the workers.dev URL with one
+        // application (one AUD), so neither can be reached ungated.
+        hostnames: [...customDomains, workersDevHost],
+        allowedIdps,
+        sessionDuration: sessionDuration || undefined,
         emails: allowedEmails,
       });
       policyAud = application.aud;
@@ -319,6 +331,24 @@ export default Alchemy.Stack(
       );
     }
     const workersSubdomain = yield* readWorkersSubdomain({ required: false });
+    // Self-host only: optional custom hostname(s) for the app worker, e.g.
+    // SELFHOST_DOMAIN=seo.example.com (zone must be on this account).
+    const customDomains = prod
+      ? []
+      : (yield* optionalVar("SELFHOST_DOMAIN"))
+          .split(",")
+          .map((host) => host.trim())
+          .filter(Boolean);
+    // Configurable CPU limits need the Workers Paid plan. Self-host deploys
+    // default to the plan default; SELFHOST_PAID_PLAN=1 opts into the same
+    // 300s allowance hosted uses.
+    const paidPlan = ["1", "true", "yes"].includes(
+      (yield* optionalVar("SELFHOST_PAID_PLAN")).toLowerCase(),
+    );
+    const cpuLimits =
+      authMode === "cloudflare_access" && !paidPlan
+        ? {}
+        : { limits: { cpuMs: 300_000 } };
 
     // Auth needs an absolute BETTER_AUTH_URL. Prod sets it explicitly;
     // previews always derive it from the deterministic worker name — a wrong
@@ -351,6 +381,7 @@ export default Alchemy.Stack(
       stage,
       authMode === "cloudflare_access" && !prod,
       workersSubdomain,
+      customDomains,
     );
 
     // Created once and bound into BOTH workers — they share the same
@@ -376,9 +407,7 @@ export default Alchemy.Stack(
       // CPU allowance the app worker used to carry for them. Configurable
       // CPU limits are a paid-plan feature; self-host deploys
       // (cloudflare_access) may run on the free plan, which rejects them.
-      ...(authMode === "cloudflare_access"
-        ? {}
-        : { limits: { cpuMs: 300_000 } }),
+      ...cpuLimits,
       observability: {
         enabled: wrangler.observability?.enabled ?? true,
         traces: { enabled: wrangler.observability?.traces?.enabled ?? false },
@@ -426,7 +455,11 @@ export default Alchemy.Stack(
     const app = yield* Cloudflare.Worker("open-seo", {
       name: workerName(stage),
       // Prod serves the real domains; the zone is inferred from the hostname.
-      domain: prod ? ["app.openseo.so", "www.app.openseo.so"] : undefined,
+      domain: prod
+        ? ["app.openseo.so", "www.app.openseo.so"]
+        : customDomains.length
+          ? customDomains
+          : undefined,
       // Prebuilt worker from `vite build` (@cloudflare/vite-plugin). The entry
       // exports the DO + WorkflowEntrypoint classes (re-exported by
       // src/server.ts), which `bundle: false` requires. Sibling chunks under
@@ -446,9 +479,7 @@ export default Alchemy.Stack(
       // limits are a paid-plan feature, and self-host deploys
       // (cloudflare_access) may run on the free plan — which rejects them —
       // so those get the plan default instead.
-      ...(authMode === "cloudflare_access"
-        ? {}
-        : { limits: { cpuMs: 300_000 } }),
+      ...cpuLimits,
       observability: {
         enabled: wrangler.observability?.enabled ?? true,
         traces: { enabled: wrangler.observability?.traces?.enabled ?? false },

@@ -65,6 +65,10 @@ export const emailAccessGate = (options: {
   applicationName: string;
   domain: string;
   emails: string[];
+  /** Every hostname the gate covers (first = primary). Defaults to `domain`. */
+  hostnames?: string[];
+  allowedIdps?: string[];
+  sessionDuration?: string;
 }) =>
   Effect.gen(function* () {
     const allow = yield* Cloudflare.Access.Policy(options.policyId, {
@@ -72,10 +76,30 @@ export const emailAccessGate = (options: {
       decision: "allow",
       include: options.emails.map((email) => ({ email: { email } })),
     });
+    const hostnames = options.hostnames?.length
+      ? options.hostnames
+      : [options.domain];
     return yield* Cloudflare.Access.Application(options.applicationId, {
       type: "self_hosted",
       name: options.applicationName,
-      domain: options.domain,
+      domain: hostnames[0],
+      ...(hostnames.length > 1
+        ? {
+            destinations: hostnames.map((uri) => ({
+              type: "public" as const,
+              uri,
+            })),
+          }
+        : {}),
+      ...(options.allowedIdps?.length
+        ? {
+            allowedIdps: options.allowedIdps,
+            autoRedirectToIdentity: options.allowedIdps.length === 1,
+          }
+        : {}),
+      ...(options.sessionDuration
+        ? { sessionDuration: options.sessionDuration }
+        : {}),
       policies: [allow.policyId],
     });
   });
